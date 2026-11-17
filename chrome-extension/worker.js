@@ -52,7 +52,7 @@ chrome.runtime.onMessage.addListener((m,sender,reply) => {
     const pairing = typeof saved[key] === "string" ? {token:saved[key],port:7877} : saved[key];
     if (m.op === "resume") return pairing ? api(pairing,"/next") : {done:true};
     if (!pairing) throw Error("Tab chưa được Vẽ Tay kết nối.");
-    if (muse && !["next","batch","progress","error","armMuse","transferMuse","skipMuse"].includes(m.op))
+    if (muse && !["next","batch","progress","error","armMuse","transferMuse","skipMuse","image"].includes(m.op))
       throw Error("Thao tác không hợp lệ trong tab Muse.");
     if (m.op === "skipMuse") {
       const job = await api(pairing, "/next");

@@ -330,16 +330,12 @@ if (location.origin !== "https://muse.ai") {
       location.assign("https://muse.ai/");
     }
   }
-  async function chatUpload(state, job) {
-    // Duong du phong dung chung: tai thang anh vua tao ngay trong khung chat
-    // (dia chi thu duoc o result()) va gui cho Ve Tay qua worker (op "image"),
-    // bo qua ca Thu vien lan buoc Chrome tai xuong. Dung khi khong tim thay o
-    // anh trong Thu vien, hoac khi anh tai xuong khong vao dung thu muc
-    // VeTay-Muse (app bao "Chrome khong luu anh 2K dung thu muc cua tac vu" -
-    // da gap o job 84de7a36 khi mot tien ich tai anh khac chiem quyen dat ten).
-    const offset = state.index - (state.batchStart ?? state.index);
-    const url = state.chatImages?.[offset];
-    if (!url) throw Error("Không có ảnh dự phòng trong khung chat.");
+  async function uploadChatImage(job, index, url) {
+    // Tai mot anh tu dia chi trong khung chat va gui thang cho Ve Tay qua
+    // worker (op "image" -> bridge /image). Khong qua Thu vien, khong qua
+    // Chrome tai xuong. Luu y: worker phai cho phep op "image" trong tab
+    // Muse - ban 1.3.38 tro ve truoc thieu op nay trong danh sach cho phep
+    // nen moi lan du phong deu bi worker tu choi ngay lap tuc.
     const response = await fetch(url, {credentials:"include"});
     if (!response.ok) throw Error("Không tải được ảnh trong khung chat.");
     const blob = await response.blob();
@@ -353,8 +349,15 @@ if (location.origin !== "https://muse.ai") {
     });
     if (!/^data:image\/(png|webp|jpeg);base64,/.test(data))
       throw Error("Ảnh trong khung chat không hợp lệ.");
-    await send({op:"progress", count:job.index + 1, stage:"generated"});
-    await send({op:"image", job:job.job, index:job.index, data});
+    await send({op:"progress", count:index + 1, stage:"generated"});
+    await send({op:"image", job:job.job, index, data});
+  }
+  async function chatUpload(state, job) {
+    // Du phong cho giai doan Thu vien: gui canh hien tai tu khung chat.
+    const offset = state.index - (state.batchStart ?? state.index);
+    const url = state.chatImages?.[offset];
+    if (!url) throw Error("Không có ảnh dự phòng trong khung chat.");
+    await uploadChatImage(job, job.index, url);
     await advance(state);
   }
   async function run() {
@@ -500,7 +503,11 @@ if (location.origin !== "https://muse.ai") {
         // Luoi Thu vien khong he lo ten tep (da thay o job fe77ec29: anh tao
         // dung ten ma tim 2 vong van khong thay o nao) -> dung du phong chat.
         try { await chatUpload(state, job); return; }
-        catch { throw error; }
+        catch (chatError) {
+          if (state.chatImages?.length)
+            throw Error(error.message + " | Dự phòng chat lỗi: " + chatError.message);
+          throw error;
+        }
       }
       item.click();
     }
@@ -529,7 +536,11 @@ if (location.origin !== "https://muse.ai") {
       // thay o anh nhung Chrome luu anh sai thu muc (tien ich khac chiem
       // quyen dat ten tep) thi van lay duoc anh ve cho Ve Tay.
       try { await chatUpload(state, job); return; }
-      catch { throw error; }
+      catch (chatError) {
+        if (state.chatImages?.length)
+          throw Error(error.message + " | Dự phòng chat lỗi: " + chatError.message);
+        throw error;
+      }
     }
   }
   async function result(state, job) {
@@ -597,6 +608,21 @@ if (location.origin !== "https://muse.ai") {
         found.push(url);
       }
       if (found.length >= expectedCount) chatImages = found.slice(-expectedCount);
+    }
+    if (confirmed && chatImages.length >= expectedCount) {
+      // DUONG CHINH (tu ban 1.3.39): gui thang toan bo anh cua batch nay ngay
+      // tu khung chat, khong sang Thu vien va khong tai xuong bang Chrome
+      // nua. Duong Thu vien cu qua mong manh: luoi khong lo ten tep, con file
+      // tai xuong thi bi tien ich khac chiem quyen dat ten khien Ve Tay tu
+      // choi (loi "Chrome khong luu anh 2K dung thu muc cua tac vu"). Nguoi
+      // dung da chap nhan dung anh ngay trong chat o chat luong tot nhat.
+      const libraryState = {...state, phase:"library", confirmed, batchStart:job.index, chatImages};
+      save(libraryState);
+      for (let offset = 0; offset < expectedCount; offset++) {
+        await uploadChatImage(job, job.index + offset, chatImages[offset]);
+      }
+      await advance(libraryState);
+      return;
     }
     // Muse can save images even when the completion message is absent.
     save({...state, phase:"library", confirmed, batchStart:job.index, chatImages});
