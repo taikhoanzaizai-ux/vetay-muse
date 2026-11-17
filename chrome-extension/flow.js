@@ -322,7 +322,8 @@ if (location.origin !== "https://muse.ai") {
       sessionStorage.removeItem(key);
     } else if (next.index < state.batchEnd) {
       save({phase:"library", job:next.job, index:next.index,
-            tag:tagFor(next, next.index, 0), batchEnd:state.batchEnd, confirmed:state.confirmed});
+            tag:tagFor(next, next.index, 0), batchEnd:state.batchEnd, confirmed:state.confirmed,
+            batchStart:state.batchStart, chatImages:state.chatImages});
       location.assign("https://muse.ai/library/media?view=images");
     } else {
       save({phase:"compose"});
@@ -386,14 +387,22 @@ if (location.origin !== "https://muse.ai") {
       files.forEach(file => data.items.add(file));
       field.dispatchEvent(new ClipboardEvent("paste", {clipboardData:data, bubbles:true, cancelable:true}));
       const composerText = () => {
-        let node = field;
-        for (let level = 0; node && level < 7; level++, node = node.parentElement) {
-          const content = node.textContent || "";
-          const labels = [...node.querySelectorAll('[aria-label],[title]')].map(el =>
+        const namesIn = root => {
+          if (!root) return false;
+          const content = root.textContent || "";
+          const labels = [...root.querySelectorAll('[aria-label],[title]')].map(el =>
             (el.getAttribute('aria-label') || '') + ' ' + (el.title || '')).join(" ");
-          if (files.every(file => (content + " " + labels).includes(file.name))) return true;
+          return files.every(file => (content + " " + labels).includes(file.name));
+        };
+        let node = field;
+        for (let level = 0; node && level < 10; level++, node = node.parentElement) {
+          if (namesIn(node)) return true;
         }
-        return false;
+        // Chip tep co the render ngoai cay cha cua o nhap (portal). Ten tep la
+        // duy nhat theo tung job/canh/lan thu nen quet ca trang khong the nham
+        // sang tin nhan cu. Ban cu chi quet 7 tang cha, bo sot chip, khien
+        // fallback gan lai qua o chon tep va moi tep bi dinh kem 2 lan.
+        return namesIn(document.body);
       };
       let attached = false;
       try { await waitFor(composerText, 8000, "paste-ignored"); attached = true; } catch {}
@@ -430,7 +439,9 @@ if (location.origin !== "https://muse.ai") {
     if (state.phase !== "library" && state.phase !== "download") throw Error("Trạng thái Muse không hợp lệ.");
     const file = new URL(location.href).searchParams.get("file");
     if (!file || !file.split("/").pop().toLowerCase().includes(state.tag)) {
-      const item = await waitFor(() => {
+      let item = null;
+      try {
+        item = await waitFor(() => {
         const matches = node => ["alt", "title", "aria-label", "href", "data-filename", "data-file-name"]
           .some(attr => (node.getAttribute(attr) || "").toLowerCase().includes(state.tag));
         const eligible = node => visible(node) && !node.closest('[role="dialog"],dialog');
@@ -457,7 +468,31 @@ if (location.origin !== "https://muse.ai") {
           }
         }
         return null;
-      }, 60000, new SceneError("Không tìm được đúng ảnh của cảnh trong Muse."));
+        }, 60000, new SceneError("Không tìm được đúng ảnh của cảnh trong Muse."));
+      } catch (error) {
+        // Luoi Thu vien khong he lo ten tep trong DOM (da thay o job
+        // fe77ec29: anh tao dung ten ma tim 2 vong van khong thay o nao).
+        // Dung dia chi anh thu duoc ngay trong khung chat: tai thang anh ve
+        // va gui cho Ve Tay qua worker (op "image"), bo qua Thu vien.
+        const offset = state.index - (state.batchStart ?? state.index);
+        const url = state.chatImages?.[offset];
+        if (!url) throw error;
+        const response = await fetch(url, {credentials:"include"});
+        if (!response.ok) throw error;
+        const blob = await response.blob();
+        if (!blob.type.startsWith("image/") || blob.size > 24*1024*1024) throw error;
+        const data = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+        if (!/^data:image\/(png|webp|jpeg);base64,/.test(data)) throw error;
+        await send({op:"progress", count:job.index + 1, stage:"generated"});
+        await send({op:"image", job:job.job, index:job.index, data});
+        await advance(state);
+        return;
+      }
       item.click();
     }
     const button = await waitFor(() => {
@@ -518,8 +553,36 @@ if (location.origin !== "https://muse.ai") {
       }
       await pause(1000);
     }
+    // Thu luon dia chi cac anh vua tao ngay trong khung chat (chi khi Muse
+    // da bao hoan tat that). Neu sang Thu vien ma khong tim thay o anh thi
+    // extension se tai thang cac anh nay ve, khong phu thuoc luoi Thu vien.
+    let chatImages = [];
+    if (confirmed) {
+      // Neo vao cuoi prompt vua gui: chi lay anh nam SAU moc nay trong trang,
+      // tranh nham anh cua cac luot chat cu (cung nam trong doan chat chinh).
+      let anchor = null;
+      if (state.promptTail) {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          if (walker.currentNode.nodeValue.includes(state.promptTail)) anchor = walker.currentNode;
+        }
+      }
+      const seen = new Set();
+      const found = [];
+      for (const img of document.images) {
+        if (img.naturalWidth < 200 || img.naturalHeight < 200) continue;
+        if (anchor && !(anchor.compareDocumentPosition(img) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+        let url = img.currentSrc || img.src || "";
+        const href = img.closest("a")?.href || "";
+        if (/\.(webp|png|jpe?g)(\?|#|$)/iu.test(href)) url = href;
+        if (!/^https:/.test(url) || /avatar/iu.test(url) || seen.has(url)) continue;
+        seen.add(url);
+        found.push(url);
+      }
+      if (found.length >= expectedCount) chatImages = found.slice(-expectedCount);
+    }
     // Muse can save images even when the completion message is absent.
-    save({...state, phase:"library", confirmed});
+    save({...state, phase:"library", confirmed, batchStart:job.index, chatImages});
     location.assign("https://muse.ai/library/media?view=images");
   }
   run().catch(async error => {
