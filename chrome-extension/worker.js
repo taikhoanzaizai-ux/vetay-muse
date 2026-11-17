@@ -20,14 +20,22 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     || urls.some(url => /^blob:https:\/\/flow\.google\.com\//i.test(url))
     || (isImage && !item.referrer && urls.some(url =>
       /^https:\/\/(?:[a-z0-9-]+\.)*(?:googleusercontent\.com|gstatic\.com)\//i.test(url)));
-  if (!fromFlow) return;
+  const muse = entry.filename !== undefined;
+  // Ten tep Muse chua ma canh vetay duy nhat cua dung canh dang cho, nen chi can
+  // khop ten tep (ke ca khi Chrome them " (1)" luc trung ten). Dieu kien cu doi
+  // referrer phai bang nguyen URL trang xem anh va URL phai thuoc muse.ai, khien
+  // anh tai qua CDN / referrer rut gon bi bo qua va VeTay khong bao gio nhan anh.
+  const baseName = name => (name || "").split(/[\\/]/).pop().toLowerCase().replace(/ \(\d+\)(\.[^.]+)$/, "$1");
+  const fromMuse = muse && isImage && baseName(item.filename) === entry.filename.toLowerCase();
+  if (muse ? !fromMuse : !fromFlow) return;
   const extension = /\.(png|jpe?g|webp)$/i.exec(item.filename || "")?.[1] || "png";
   entry.id = item.id;
-  suggest({filename:"VeTay-2K/" + entry.stem + "." + extension, conflictAction:"overwrite"});
+  suggest({filename:(muse ? "VeTay-Muse/" : "VeTay-2K/") + "" + entry.stem + "." + extension, conflictAction:"overwrite"});
 });
 chrome.runtime.onMessage.addListener((m,sender,reply) => {
   (async()=>{
-    if (!flowTab(sender.tab?.url)) throw Error("Chỉ nhận yêu cầu từ tab Flow.");
+    const muse = sender.frameId === 0 && sender.tab?.url?.startsWith("https://muse.ai/");
+    if (!muse && !flowTab(sender.tab?.url)) throw Error("Tab không thuộc Google Flow hoặc Muse.");
     const key = "pairing:" + sender.tab.id;
     if (m.op === "pair") {
       if (!/^[a-f0-9]{32}$/.test(m.token || "")) throw Error("Mã kết nối không hợp lệ.");
@@ -36,6 +44,7 @@ chrome.runtime.onMessage.addListener((m,sender,reply) => {
       const connection = {token:m.token, port};
       const job = await api(connection, "/next");
       if (job.done) throw Error("Vẽ Tay chưa có cảnh chờ.");
+      if (muse !== (job.provider === "muse")) throw Error("Nguồn ảnh không khớp tác vụ.");
       await chrome.storage.session.set({[key]:connection});
       return job;
     }
@@ -43,6 +52,40 @@ chrome.runtime.onMessage.addListener((m,sender,reply) => {
     const pairing = typeof saved[key] === "string" ? {token:saved[key],port:7877} : saved[key];
     if (m.op === "resume") return pairing ? api(pairing,"/next") : {done:true};
     if (!pairing) throw Error("Tab chưa được Vẽ Tay kết nối.");
+    if (muse && !["next","batch","progress","error","armMuse","transferMuse","skipMuse"].includes(m.op))
+      throw Error("Thao tác không hợp lệ trong tab Muse.");
+    if (m.op === "skipMuse") {
+      const job = await api(pairing, "/next");
+      if (!muse || job.provider !== "muse" || job.job !== m.job || job.index !== m.index)
+        throw Error("Cảnh Muse cần bỏ qua không khớp.");
+      pendingDownloads.delete(key);
+      return api(pairing, "/skipMuse/" + job.job + "/" + job.index, "{}");
+    }
+    if (m.op === "armMuse" || m.op === "transferMuse") {
+      const job = await api(pairing, "/next");
+      if (!muse || job.provider !== "muse" || job.job !== m.job || job.index !== m.index)
+        throw Error("Tác vụ ảnh Muse đã đổi.");
+      if (m.op === "armMuse") {
+        const page = new URL(sender.tab.url);
+        const filename = page.searchParams.get("file")?.split("/").pop();
+        const tag = "vetay" + job.job.slice(0, 12) + "c" + String(job.index + 1).padStart(5, "0");
+        if (page.pathname !== "/library/media" || filename !== m.filename ||
+            !filename?.toLowerCase().includes(tag) || !/\.(png|jpe?g|webp)$/i.test(filename))
+          throw Error("Ảnh đang mở không khớp mã cảnh Muse.");
+        pendingDownloads.set(key, {stem: job.job + "-" + job.index, filename,
+                                   page: sender.tab.url, deadline: Date.now() + 90000});
+        return {armed:true};
+      }
+      const entry = pendingDownloads.get(key);
+      if (!entry?.id) return {received:false};
+      const [item] = await chrome.downloads.search({id:entry.id});
+      if (item?.state === "interrupted") throw Error("Chrome đã ngắt lượt tải ảnh Muse.");
+      if (item?.state !== "complete") return {received:false};
+      const result = await api(pairing, "/downloadMuse/" + job.job + "/" + job.index,
+                               JSON.stringify({path:item.filename}));
+      pendingDownloads.delete(key);
+      return result;
+    }
     if (m.op === "arm2k" || m.op === "transfer2k") {
       const job = await api(pairing,"/next");
       if (job.done || job.job !== m.job || job.index !== m.index) throw Error("Tác vụ ảnh 2K đã đổi.");

@@ -1,6 +1,6 @@
 # Vẽ Tay cho Windows
 
-Tải `VeTay-Windows-Setup.exe` từ [GitHub Releases](https://github.com/taikhoanzaizai-ux/vetay/releases) sau khi build thành công. Bộ cài chứa Python, các thư viện, FFmpeg và Whiteboard Animation VI kèm model ISNet. Bản cài không cần bản Whiteboard Animation VI trong Downloads, Git hay lệnh PowerShell khi sử dụng. Giao diện mở bằng cửa sổ ứng dụng WebView2. Chế độ Flow mở Microsoft Edge với phiên đăng nhập riêng.
+Tải `VeTay-Windows-Setup.exe` từ [GitHub Releases](https://github.com/taikhoanzaizai-ux/vetay-muse/releases) sau khi build thành công. Bộ cài chứa Python, các thư viện, FFmpeg và Whiteboard Animation VI kèm model ISNet. Bản cài không cần bản Whiteboard Animation VI trong Downloads, Git hay lệnh PowerShell khi sử dụng. Giao diện mở bằng cửa sổ ứng dụng WebView2. Chế độ Flow mở Microsoft Edge với phiên đăng nhập riêng.
 
 ## Tạo video
 

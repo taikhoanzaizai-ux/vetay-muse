@@ -1,3 +1,4 @@
+if (location.origin !== "https://muse.ai") {
 (() => {
   const pairing = /^#vetay=([a-f0-9]{32})(?:-([0-9]{4,5}))?$/.exec(location.hash);
   if (window.__veTayRunning) return;
@@ -286,3 +287,267 @@
     try {await send({op:"error",message:error.message});} catch { console.warn("Vẽ Tay: ghép nối hoặc gửi trạng thái thất bại.", error.message); }
   }).finally(()=>{window.__veTayRunning=false;});
 })();
+} else {
+(() => {
+  const match = /^#vetay=([a-f0-9]{32})-(\d{4,5})$/.exec(location.hash);
+  const key = "vetay-muse-task";
+  if (!match && !sessionStorage.getItem(key)) return;
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const label = node => (node.getAttribute("aria-label") || node.title || node.textContent || "").trim();
+  const visible = node => node.getClientRects().length && !node.disabled && node.getAttribute("aria-disabled") !== "true";
+  const controls = pattern => [...document.querySelectorAll("button,[role=button]")].filter(node => visible(node) && pattern.test(label(node)));
+  const send = async message => {
+    const response = await chrome.runtime.sendMessage(message);
+    if (!response?.ok) throw Error(response?.error || "Mất kết nối với Vẽ Tay.");
+    return response.result;
+  };
+  async function waitFor(find, ms, message) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      const value = find();
+      if (value) return value;
+      await pause(500);
+    }
+    throw message instanceof Error ? message : Error(message);
+  }
+  function save(state) {
+    sessionStorage.setItem(key, JSON.stringify(state));
+  }
+  class SceneError extends Error {}
+  const tagFor = (job, index, attempt) =>
+    "vetay" + job.job.slice(0, 12) + "c" + String(index + 1).padStart(5, "0") + "r" + attempt;
+  async function advance(state) {
+    const next = await send({op:"next"});
+    if (next.done) {
+      sessionStorage.removeItem(key);
+    } else if (next.index < state.batchEnd) {
+      save({phase:"library", job:next.job, index:next.index,
+            tag:tagFor(next, next.index, 0), batchEnd:state.batchEnd, confirmed:state.confirmed});
+      location.assign("https://muse.ai/library/media?view=images");
+    } else {
+      save({phase:"compose"});
+      location.assign("https://muse.ai/");
+    }
+  }
+  async function run() {
+    const state = match ? {phase:"compose"} : JSON.parse(sessionStorage.getItem(key));
+    const job = await send(match ? {op:"pair", token:match[1], port:Number(match[2])} : {op:"resume"});
+    if (job.done) {
+      sessionStorage.removeItem(key);
+      return;
+    }
+    if (job.provider !== "muse") throw Error("Tác vụ hiện tại không thuộc Muse.");
+    if (!match && state.phase !== "compose" && (state.job !== job.job || state.index !== job.index))
+      throw Error("Cảnh Muse đã thay đổi. Hãy bắt đầu lại từ Vẽ Tay.");
+    if (match) {
+      save(state);
+      history.replaceState(history.state, "", location.pathname + location.search);
+    }
+    if (state.phase === "compose") {
+      if (state.delay) {
+        await send({op:"progress", count:job.index + 1, stage:state.attempt ? "retry" : "batch"});
+        await pause(state.delay);
+      }
+      const field = await waitFor(() => {
+        const editors = [...document.querySelectorAll('textarea,[contenteditable=true],[contenteditable=plaintext-only],input:not([type]),input[type=text],[role=textbox]')]
+          .filter(node => visible(node) && !node.readOnly && !node.closest('[inert],[aria-hidden=true],[role=search],aside,nav,[role=dialog]'))
+          .filter(node => node.matches('textarea,input') || node.isContentEditable);
+        const bottom = editors.filter(node => node.getBoundingClientRect().bottom > innerHeight * 0.7);
+        const named = bottom.filter(node => ['aria-label','placeholder','data-placeholder','title']
+          .some(attr => /^(Nhắn tin|Message|Send a message|Type a message)(?:$|[.…])/iu.test((node.getAttribute(attr) || '').trim())));
+        const choices = named.length ? named : bottom;
+        return choices.filter(node => !choices.some(other => other !== node && node.contains(other)))
+          .reduce((best, node) => !best || node.getBoundingClientRect().width > best.getBoundingClientRect().width ? node : best, null);
+      }, 30000, "Không thấy ô Nhắn tin. Hãy đăng nhập Muse trong Chrome rồi thử lại.");
+      if ((field.value ?? field.innerText ?? field.textContent).trim()) throw Error("Ô Nhắn tin Muse đang có bản nháp.");
+      const batch = await send({op:"batch"});
+      if (batch.done || batch.job !== job.job || batch.index !== job.index)
+        throw Error("Danh sách cảnh Muse đã thay đổi.");
+      const attempt = state.attempt || 0;
+      const prompts = batch.prompts.slice(0, attempt ? 1 : 4);
+      const batchEnd = attempt ? state.batchEnd : job.index + prompts.length;
+      const tag = tagFor(job, job.index, attempt);
+      const files = prompts.map((description, offset) => {
+        const code = tagFor(job, job.index + offset, attempt);
+        return new File([code + "\n" + description], code + ".txt", {type:"text/plain"});
+      });
+      const scenes = prompts.map((description, offset) => {
+        const index = job.index + offset;
+        return "Cảnh " + (index + 1) + " | " + tagFor(job, index, attempt) + "\n" + description;
+      });
+      const prompt = "Tạo đúng " + scenes.length + " ảnh trong lượt này, mỗi cảnh bên dưới một ảnh riêng. " +
+        "Nếu có thể, chạy các cảnh song song. Lưu tất cả vào Thư viện hình ảnh. " +
+        "Đặt tên mỗi ảnh bắt đầu bằng mã cảnh tương ứng, giữ nguyên mã. Không đưa mã vào nội dung ảnh. " +
+        "Các tệp TXT đính kèm là bản sao của các prompt bên dưới, chỉ tạo một ảnh cho mỗi mã. " +
+        "Khi xong, báo Hoàn tất và liệt kê các mã đã tạo. Mã đầu đợt: " + tag + "\n\n" +
+        scenes.join("\n\n");
+      field.focus();
+      const data = new DataTransfer();
+      files.forEach(file => data.items.add(file));
+      field.dispatchEvent(new ClipboardEvent("paste", {clipboardData:data, bubbles:true, cancelable:true}));
+      const composerText = () => {
+        let node = field;
+        for (let level = 0; node && level < 7; level++, node = node.parentElement) {
+          const content = node.textContent || "";
+          const labels = [...node.querySelectorAll('[aria-label],[title]')].map(el =>
+            (el.getAttribute('aria-label') || '') + ' ' + (el.title || '')).join(" ");
+          if (files.every(file => (content + " " + labels).includes(file.name))) return true;
+        }
+        return false;
+      };
+      let attached = false;
+      try { await waitFor(composerText, 8000, "paste-ignored"); attached = true; } catch {}
+      if (!attached) {
+        // Muse co the bo qua su kien paste gia lap: thu lai bang o chon tep co san.
+        const fileInput = [...document.querySelectorAll('input[type="file"]')].filter(node => !node.disabled)[0];
+        if (fileInput) {
+          const transfer = new DataTransfer();
+          files.forEach(file => transfer.items.add(file));
+          fileInput.files = transfer.files;
+          fileInput.dispatchEvent(new Event("input", {bubbles:true}));
+          fileInput.dispatchEvent(new Event("change", {bubbles:true}));
+        }
+        await waitFor(composerText, 20000, "Muse chưa nhận đủ " + files.length + " tệp. Đã dừng trước khi gửi.");
+      }
+      if (field instanceof HTMLTextAreaElement || field instanceof HTMLInputElement) {
+        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field), "value").set.call(field, prompt);
+        field.dispatchEvent(new InputEvent("input", {bubbles:true, data:prompt}));
+      } else if (!document.execCommand("insertText", false, prompt)) {
+        throw Error("Không điền được lệnh tạo ảnh Muse.");
+      }
+      const button = await waitFor(() => {
+        const buttons = controls(/^(Gửi|Send|Send message)$/iu);
+        return buttons.length === 1 ? buttons[0] : null;
+      }, 8000, "Không tìm được nút Gửi của Muse.");
+      const next = {phase:"await", job:job.job, index:job.index, tag, attempt, batchEnd, submittedAt:Date.now(), promptTail:prompt.slice(-48)};
+      save(next);
+      button.click();
+      await send({op:"progress", count:job.index + prompts.length, stage:"submitted"});
+      await waitFor(() => !(field.value ?? field.textContent).includes(tag), 12000, "Muse chưa nhận prompt.");
+      return await result(next, job);
+    }
+    if (state.phase === "await") return await result(state, job);
+    if (state.phase !== "library" && state.phase !== "download") throw Error("Trạng thái Muse không hợp lệ.");
+    const file = new URL(location.href).searchParams.get("file");
+    if (!file || !file.split("/").pop().toLowerCase().includes(state.tag)) {
+      const item = await waitFor(() => {
+        const matches = node => ["alt", "title", "aria-label", "href", "data-filename", "data-file-name"]
+          .some(attr => (node.getAttribute(attr) || "").toLowerCase().includes(state.tag));
+        const eligible = node => visible(node) && !node.closest('[role="dialog"],dialog');
+        const thumbnails = [...document.querySelectorAll("img")].filter(node => eligible(node) && matches(node));
+        if (thumbnails.length === 1) return thumbnails[0];
+        const named = [...document.querySelectorAll('[title],[aria-label],a[href],[data-filename],[data-file-name]')]
+          .filter(node => eligible(node) && matches(node));
+        const controls = [...new Set(named.map(node => node.closest('button,[role="button"],a') || node))];
+        if (controls.length === 1) return controls[0];
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        const found = new Set();
+        while (walker.nextNode()) {
+          const text = walker.currentNode;
+          if (!text.nodeValue.trim().toLowerCase().startsWith(state.tag)) continue;
+          const card = text.parentElement.closest('button,[role="button"],a');
+          if (card && eligible(card)) found.add(card);
+        }
+        if (found.size === 1) return [...found][0];
+        for (const grid of document.querySelectorAll('main, [role="main"], main div, [role="main"] div')) {
+          if (grid.clientHeight > 150 && grid.scrollHeight > grid.clientHeight &&
+              /^(auto|scroll)$/.test(getComputedStyle(grid).overflowY)) {
+            const atEnd = grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 2;
+            grid.scrollTop = atEnd ? 0 : grid.scrollTop + Math.floor(grid.clientHeight * 0.8);
+          }
+        }
+        return null;
+      }, 60000, new SceneError("Không tìm được đúng ảnh của cảnh trong Muse."));
+      item.click();
+    }
+    const button = await waitFor(() => {
+      const file = new URL(location.href).searchParams.get("file");
+      if (!file?.split("/").pop().toLowerCase().includes(state.tag)) return null;
+      const buttons = controls(/^(Tải xuống|Download)$/iu).filter(node => node.closest('[role="dialog"],dialog'));
+      return buttons.length === 1 ? buttons[0] : null;
+    }, 12000, new SceneError("Không mở được ảnh đúng mã cảnh."));
+    const filename = new URL(location.href).searchParams.get("file").split("/").pop();
+    await send({op:"progress", count:job.index + 1, stage:"generated"});
+    await send({op:"armMuse", job:job.job, index:job.index, filename});
+    button.click();
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      if ((await send({op:"transferMuse", job:job.job, index:job.index})).received) {
+        await advance(state);
+        return;
+      }
+      await pause(800);
+    }
+    throw new SceneError("Chrome chưa tải xong ảnh Muse.");
+  }
+  async function result(state, job) {
+    let confirmed = false;
+    const expectedCount = state.attempt ? 1 : state.batchEnd - job.index;
+    const tags = Array.from({length:expectedCount}, (_, offset) =>
+      tagFor(job, job.index + offset, state.attempt || 0));
+    const deadline = Date.now() + 245000;
+    while (Date.now() < deadline) {
+      const full = document.body?.innerText || "";
+      // Chi xet phan trang SAU tin nhan minh vua gui. Ban than prompt co cau
+      // "Khi xong, bao Hoan tat va liet ke cac ma da tao": neu quet ca prompt
+      // thi tien ich se nhan nham la Muse da tao xong ngay khi vua bam Gui,
+      // nhay sang Thu vien qua som trong khi chua co anh nao (ban 1.3.35 mac
+      // loi nay vi mau quet qua rong "hoan tat.{0,80}da tao").
+      let start = 0;
+      if (state.promptTail) {
+        const tailAt = full.lastIndexOf(state.promptTail);
+        if (tailAt >= 0) start = tailAt + state.promptTail.length;
+      }
+      const text = full.slice(start);
+      const at = text.lastIndexOf(state.tag);
+      if (at >= 0) {
+        const nearby = text.slice(Math.max(0, at - 6000), at + 16000);
+        const after = text.slice(at);
+        if (/hết (?:hạn mức|lượt)|đã đạt giới hạn|(?:weekly|usage|rate) limit|quota exceeded/iu.test(after))
+          throw Error("Muse báo giới hạn sử dụng. Đã dừng gửi thêm prompt.");
+        const complete = /hoàn tất\s*[—–:-]\s*đã tạo (?:xong|đúng)|đã tạo xong toàn bộ|đã tạo (?:xong|đúng) (?:toàn bộ|tất cả|\d+ ảnh)|completed\s*[—–:-]\s*(?:all|generated)/iu.test(nearby);
+        // Tao anh that khong bao gio xong trong duoi 25 giay; khoa thoi gian
+        // nay chan not moi nhan nham con sot lai tu noi dung phan chieu.
+        const settled = !state.submittedAt || Date.now() - state.submittedAt >= 25000;
+        if (settled && complete && tags.every(tag => nearby.includes(tag))) {
+          confirmed = true;
+          break;
+        }
+        if (/chưa được tạo trong lượt này|cần sang lượt tiếp theo|not generated in this batch/iu.test(after)) break;
+        if (/không thể tạo ảnh|tạo ảnh thất bại|image generation failed/iu.test(after)) break;
+      }
+      await pause(1000);
+    }
+    // Muse can save images even when the completion message is absent.
+    save({...state, phase:"library", confirmed});
+    location.assign("https://muse.ai/library/media?view=images");
+  }
+  run().catch(async error => {
+    const state = JSON.parse(sessionStorage.getItem(key) || "null");
+    try {
+      if (error instanceof SceneError && state?.job) {
+        if (state.phase === "library" && !state.libraryRetried) {
+          save({...state, libraryRetried:true});
+          location.replace("https://muse.ai/library/media?view=images");
+          return;
+        }
+        if (state.confirmed || /tải xong|mở được ảnh/iu.test(error.message))
+          throw Error("Không lấy được ảnh có sẵn của cảnh " + (state.index + 1) + " (" + state.tag + "). " + error.message);
+        if (!state.attempt) {
+          save({phase:"compose", attempt:1, delay:20000, batchEnd:state.batchEnd});
+          location.assign("https://muse.ai/");
+        } else {
+          await send({op:"skipMuse", job:state.job, index:state.index});
+          await advance(state);
+        }
+        return;
+      }
+      throw error;
+    } catch (failure) {
+      sessionStorage.removeItem(key);
+      try { await send({op:"error", message:failure.message}); } catch {}
+    }
+  });
+})();
+
+}
