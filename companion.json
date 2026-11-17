@@ -1,10 +1,10 @@
 {
-  "version": "1.3.37",
-  "commit": "c23b7f2a9550ce7707ea4388530ab1e2fb6dbc8a",
+  "version": "1.3.38",
+  "commit": "87d367c44cc922af51b838138739e9d9389b9cc9",
   "files": {
     "worker.js": "19a8dfb3a3ce05cae01231889de33f5f2d545e7a",
-    "manifest.json": "827e4c358a01e7c7de2c85dbe52bda32f7945a77",
-    "flow.js": "601748a524d5d3df8a6a6a3f5cbe8df7b1e61673",
+    "manifest.json": "5f7b104a8f6b194808141f6804a156f40b8a862d",
+    "flow.js": "5c9a0d0358750c316218dea722d0f34907a24f46",
     "popup.html": "d1f3fe3d89500eb7788fc312842525a9c22193c4"
   }
 }
