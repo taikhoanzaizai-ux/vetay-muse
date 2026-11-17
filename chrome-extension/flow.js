@@ -330,6 +330,33 @@ if (location.origin !== "https://muse.ai") {
       location.assign("https://muse.ai/");
     }
   }
+  async function chatUpload(state, job) {
+    // Duong du phong dung chung: tai thang anh vua tao ngay trong khung chat
+    // (dia chi thu duoc o result()) va gui cho Ve Tay qua worker (op "image"),
+    // bo qua ca Thu vien lan buoc Chrome tai xuong. Dung khi khong tim thay o
+    // anh trong Thu vien, hoac khi anh tai xuong khong vao dung thu muc
+    // VeTay-Muse (app bao "Chrome khong luu anh 2K dung thu muc cua tac vu" -
+    // da gap o job 84de7a36 khi mot tien ich tai anh khac chiem quyen dat ten).
+    const offset = state.index - (state.batchStart ?? state.index);
+    const url = state.chatImages?.[offset];
+    if (!url) throw Error("Không có ảnh dự phòng trong khung chat.");
+    const response = await fetch(url, {credentials:"include"});
+    if (!response.ok) throw Error("Không tải được ảnh trong khung chat.");
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/") || blob.size > 24*1024*1024)
+      throw Error("Ảnh trong khung chat không hợp lệ.");
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    if (!/^data:image\/(png|webp|jpeg);base64,/.test(data))
+      throw Error("Ảnh trong khung chat không hợp lệ.");
+    await send({op:"progress", count:job.index + 1, stage:"generated"});
+    await send({op:"image", job:job.job, index:job.index, data});
+    await advance(state);
+  }
   async function run() {
     const state = match ? {phase:"compose"} : JSON.parse(sessionStorage.getItem(key));
     const job = await send(match ? {op:"pair", token:match[1], port:Number(match[2])} : {op:"resume"});
@@ -470,32 +497,15 @@ if (location.origin !== "https://muse.ai") {
         return null;
         }, 60000, new SceneError("Không tìm được đúng ảnh của cảnh trong Muse."));
       } catch (error) {
-        // Luoi Thu vien khong he lo ten tep trong DOM (da thay o job
-        // fe77ec29: anh tao dung ten ma tim 2 vong van khong thay o nao).
-        // Dung dia chi anh thu duoc ngay trong khung chat: tai thang anh ve
-        // va gui cho Ve Tay qua worker (op "image"), bo qua Thu vien.
-        const offset = state.index - (state.batchStart ?? state.index);
-        const url = state.chatImages?.[offset];
-        if (!url) throw error;
-        const response = await fetch(url, {credentials:"include"});
-        if (!response.ok) throw error;
-        const blob = await response.blob();
-        if (!blob.type.startsWith("image/") || blob.size > 24*1024*1024) throw error;
-        const data = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
-        if (!/^data:image\/(png|webp|jpeg);base64,/.test(data)) throw error;
-        await send({op:"progress", count:job.index + 1, stage:"generated"});
-        await send({op:"image", job:job.job, index:job.index, data});
-        await advance(state);
-        return;
+        // Luoi Thu vien khong he lo ten tep (da thay o job fe77ec29: anh tao
+        // dung ten ma tim 2 vong van khong thay o nao) -> dung du phong chat.
+        try { await chatUpload(state, job); return; }
+        catch { throw error; }
       }
       item.click();
     }
-    const button = await waitFor(() => {
+    try {
+      const button = await waitFor(() => {
       const file = new URL(location.href).searchParams.get("file");
       if (!file?.split("/").pop().toLowerCase().includes(state.tag)) return null;
       const buttons = controls(/^(Tải xuống|Download)$/iu).filter(node => node.closest('[role="dialog"],dialog'));
@@ -513,7 +523,14 @@ if (location.origin !== "https://muse.ai") {
       }
       await pause(800);
     }
-    throw new SceneError("Chrome chưa tải xong ảnh Muse.");
+      throw new SceneError("Chrome chưa tải xong ảnh Muse.");
+    } catch (error) {
+      // Ca giai doan mo anh + tai xuong deu co du phong chat: ke ca khi tim
+      // thay o anh nhung Chrome luu anh sai thu muc (tien ich khac chiem
+      // quyen dat ten tep) thi van lay duoc anh ve cho Ve Tay.
+      try { await chatUpload(state, job); return; }
+      catch { throw error; }
+    }
   }
   async function result(state, job) {
     let confirmed = false;
