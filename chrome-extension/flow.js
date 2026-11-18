@@ -323,7 +323,7 @@ if (location.origin !== "https://muse.ai") {
     } else if (next.index < state.batchEnd) {
       save({phase:"library", job:next.job, index:next.index,
             tag:tagFor(next, next.index, 0), batchEnd:state.batchEnd, confirmed:state.confirmed,
-            batchStart:state.batchStart, chatImages:state.chatImages});
+            batchStart:state.batchStart, chatImages:state.chatImages, harvestDiag:state.harvestDiag});
       location.assign("https://muse.ai/library/media?view=images");
     } else {
       save({phase:"compose"});
@@ -543,11 +543,15 @@ if (location.origin !== "https://muse.ai") {
       }
     }
   }
+  let lastHarvestDiag = "";
   function harvestChatImages(state, expectedCount) {
     // Thu dia chi cac anh vua tao trong khung chat. Neo vao cuoi prompt vua
     // gui: chi lay anh nam SAU moc nay trong trang, tranh nham anh cua cac
     // luot chat cu (cung nam trong doan chat chinh). Chi tra ve khi du so
     // luong cua batch; thieu la tra rong de khong bao gio anh xa sai canh.
+    // Moi lan quet deu ghi lai chan doan (lastHarvestDiag) de khi job dung,
+    // thong bao loi cho biet trang chat luc do co bao nhieu anh, kich thuoc
+    // that lon nhat la bao nhieu va neo co tim thay khong - het phai doan.
     let anchor = null;
     if (state.promptTail) {
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -557,8 +561,12 @@ if (location.origin !== "https://muse.ai") {
     }
     const seen = new Set();
     const found = [];
+    let big = 0, maxW = 0, maxH = 0;
     for (const img of document.images) {
-      if (img.naturalWidth < 200 || img.naturalHeight < 200) continue;
+      maxW = Math.max(maxW, img.naturalWidth || 0);
+      maxH = Math.max(maxH, img.naturalHeight || 0);
+      if (img.naturalWidth < 100 || img.naturalHeight < 100) continue;
+      big++;
       if (anchor && !(anchor.compareDocumentPosition(img) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
       let url = img.currentSrc || img.src || "";
       const href = img.closest("a")?.href || "";
@@ -567,6 +575,8 @@ if (location.origin !== "https://muse.ai") {
       seen.add(url);
       found.push(url);
     }
+    lastHarvestDiag = "chat[img=" + document.images.length + " lon=" + big +
+      " neo=" + (anchor ? 1 : 0) + " max=" + maxW + "x" + maxH + " thu=" + found.length + "]";
     return found.length >= expectedCount ? found.slice(-expectedCount) : [];
   }
   async function result(state, job) {
@@ -629,7 +639,7 @@ if (location.origin !== "https://muse.ai") {
       // tai xuong thi bi tien ich khac chiem quyen dat ten khien Ve Tay tu
       // choi (loi "Chrome khong luu anh 2K dung thu muc cua tac vu"). Nguoi
       // dung da chap nhan dung anh ngay trong chat o chat luong tot nhat.
-      const libraryState = {...state, phase:"library", confirmed, batchStart:job.index, chatImages};
+      const libraryState = {...state, phase:"library", confirmed, batchStart:job.index, chatImages, harvestDiag:lastHarvestDiag};
       save(libraryState);
       for (let offset = 0; offset < expectedCount; offset++) {
         await uploadChatImage(job, job.index + offset, chatImages[offset]);
@@ -638,7 +648,7 @@ if (location.origin !== "https://muse.ai") {
       return;
     }
     // Muse can save images even when the completion message is absent.
-    save({...state, phase:"library", confirmed, batchStart:job.index, chatImages});
+    save({...state, phase:"library", confirmed, batchStart:job.index, chatImages, harvestDiag:lastHarvestDiag});
     location.assign("https://muse.ai/library/media?view=images");
   }
   run().catch(async error => {
@@ -651,7 +661,8 @@ if (location.origin !== "https://muse.ai") {
           return;
         }
         if (state.confirmed || /tải xong|mở được ảnh/iu.test(error.message))
-          throw Error("Không lấy được ảnh có sẵn của cảnh " + (state.index + 1) + " (" + state.tag + "). " + error.message);
+          throw Error("Không lấy được ảnh có sẵn của cảnh " + (state.index + 1) + " (" + state.tag + "). " + error.message +
+            (state.harvestDiag ? " " + state.harvestDiag : ""));
         if (!state.attempt) {
           save({phase:"compose", attempt:1, delay:20000, batchEnd:state.batchEnd});
           location.assign("https://muse.ai/");
