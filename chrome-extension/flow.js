@@ -543,6 +543,32 @@ if (location.origin !== "https://muse.ai") {
       }
     }
   }
+  function harvestChatImages(state, expectedCount) {
+    // Thu dia chi cac anh vua tao trong khung chat. Neo vao cuoi prompt vua
+    // gui: chi lay anh nam SAU moc nay trong trang, tranh nham anh cua cac
+    // luot chat cu (cung nam trong doan chat chinh). Chi tra ve khi du so
+    // luong cua batch; thieu la tra rong de khong bao gio anh xa sai canh.
+    let anchor = null;
+    if (state.promptTail) {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        if (walker.currentNode.nodeValue.includes(state.promptTail)) anchor = walker.currentNode;
+      }
+    }
+    const seen = new Set();
+    const found = [];
+    for (const img of document.images) {
+      if (img.naturalWidth < 200 || img.naturalHeight < 200) continue;
+      if (anchor && !(anchor.compareDocumentPosition(img) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+      let url = img.currentSrc || img.src || "";
+      const href = img.closest("a")?.href || "";
+      if (/\.(webp|png|jpe?g)(\?|#|$)/iu.test(href)) url = href;
+      if (!/^(https|blob):/.test(url) || /avatar/iu.test(url) || seen.has(url)) continue;
+      seen.add(url);
+      found.push(url);
+    }
+    return found.length >= expectedCount ? found.slice(-expectedCount) : [];
+  }
   async function result(state, job) {
     let confirmed = false;
     const expectedCount = state.attempt ? 1 : state.batchEnd - job.index;
@@ -581,33 +607,20 @@ if (location.origin !== "https://muse.ai") {
       }
       await pause(1000);
     }
-    // Thu luon dia chi cac anh vua tao ngay trong khung chat (chi khi Muse
-    // da bao hoan tat that). Neu sang Thu vien ma khong tim thay o anh thi
-    // extension se tai thang cac anh nay ve, khong phu thuoc luoi Thu vien.
+    // Thu dia chi cac anh vua tao ngay trong khung chat (chi khi Muse da
+    // bao hoan tat that). Anh co the hien cham hon dong bao hoan tat vai
+    // giay: job 85fd96c07ae5 (ban 1.3.39) xac nhan xong, quet mot lan thi
+    // chua thu duoc anh nao nen phai lui ve Thu vien va ket o canh 2, trong
+    // khi canh 1 tai duoc bang duong cu. Ban 1.3.40 cho toi da 30 giay,
+    // quet lai moi 1.5 giay den khi du so anh cua batch.
     let chatImages = [];
     if (confirmed) {
-      // Neo vao cuoi prompt vua gui: chi lay anh nam SAU moc nay trong trang,
-      // tranh nham anh cua cac luot chat cu (cung nam trong doan chat chinh).
-      let anchor = null;
-      if (state.promptTail) {
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-        while (walker.nextNode()) {
-          if (walker.currentNode.nodeValue.includes(state.promptTail)) anchor = walker.currentNode;
-        }
+      const harvestDeadline = Date.now() + 30000;
+      while (true) {
+        chatImages = harvestChatImages(state, expectedCount);
+        if (chatImages.length >= expectedCount || Date.now() >= harvestDeadline) break;
+        await pause(1500);
       }
-      const seen = new Set();
-      const found = [];
-      for (const img of document.images) {
-        if (img.naturalWidth < 200 || img.naturalHeight < 200) continue;
-        if (anchor && !(anchor.compareDocumentPosition(img) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
-        let url = img.currentSrc || img.src || "";
-        const href = img.closest("a")?.href || "";
-        if (/\.(webp|png|jpe?g)(\?|#|$)/iu.test(href)) url = href;
-        if (!/^https:/.test(url) || /avatar/iu.test(url) || seen.has(url)) continue;
-        seen.add(url);
-        found.push(url);
-      }
-      if (found.length >= expectedCount) chatImages = found.slice(-expectedCount);
     }
     if (confirmed && chatImages.length >= expectedCount) {
       // DUONG CHINH (tu ban 1.3.39): gui thang toan bo anh cua batch nay ngay
