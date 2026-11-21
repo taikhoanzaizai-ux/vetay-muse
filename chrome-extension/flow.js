@@ -395,7 +395,12 @@ if (location.origin !== "https://muse.ai") {
       if (batch.done || batch.job !== job.job || batch.index !== job.index)
         throw Error("Danh sách cảnh Muse đã thay đổi.");
       const attempt = state.attempt || 0;
-      const prompts = batch.prompts.slice(0, attempt ? 1 : 4);
+      // Tu ban 1.3.43 theo yeu cau cua nguoi dung (2026-11-21): moi luot chi
+      // gui DUNG 1 prompt, tai xong 1 anh ve moi gui prompt tiep theo, cu the
+      // chay het viec. Cach gom 4 prompt/luot lam buoc nhan dien va thu anh
+      // mong manh (anh tao du trong chat ma extension thu ve duoc 0), con gui
+      // le thi loi chi ket dung 1 canh va thu lai duoc ngay.
+      const prompts = batch.prompts.slice(0, 1);
       const batchEnd = attempt ? state.batchEnd : job.index + prompts.length;
       const tag = tagFor(job, job.index, attempt);
       const files = prompts.map((description, offset) => {
