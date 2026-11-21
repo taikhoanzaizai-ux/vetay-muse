@@ -368,7 +368,12 @@ if (location.origin !== "https://muse.ai") {
       return;
     }
     if (job.provider !== "muse") throw Error("Tác vụ hiện tại không thuộc Muse.");
-    if (!match && state.phase !== "compose" && (state.job !== job.job || state.index !== job.index))
+    if (!match && state.phase === "collect") {
+      // Giua dot, job.index la so anh da nhan duoc nen nam giua roundStart
+      // va roundEnd la hop le (tai lai trang giua chung van vao lai duoc).
+      if (state.job !== job.job || job.index < state.roundStart || job.index > state.roundEnd)
+        throw Error("Cảnh Muse đã thay đổi. Hãy bắt đầu lại từ Vẽ Tay.");
+    } else if (!match && state.phase !== "compose" && (state.job !== job.job || state.index !== job.index))
       throw Error("Cảnh Muse đã thay đổi. Hãy bắt đầu lại từ Vẽ Tay.");
     if (match) {
       save(state);
@@ -379,45 +384,40 @@ if (location.origin !== "https://muse.ai") {
         await send({op:"progress", count:job.index + 1, stage:state.attempt ? "retry" : "batch"});
         await pause(state.delay);
       }
-      const field = await waitFor(() => {
-        const editors = [...document.querySelectorAll('textarea,[contenteditable=true],[contenteditable=plaintext-only],input:not([type]),input[type=text],[role=textbox]')]
-          .filter(node => visible(node) && !node.readOnly && !node.closest('[inert],[aria-hidden=true],[role=search],aside,nav,[role=dialog]'))
-          .filter(node => node.matches('textarea,input') || node.isContentEditable);
-        const bottom = editors.filter(node => node.getBoundingClientRect().bottom > innerHeight * 0.7);
-        const named = bottom.filter(node => ['aria-label','placeholder','data-placeholder','title']
-          .some(attr => /^(Nhắn tin|Message|Send a message|Type a message)(?:$|[.…])/iu.test((node.getAttribute(attr) || '').trim())));
-        const choices = named.length ? named : bottom;
-        return choices.filter(node => !choices.some(other => other !== node && node.contains(other)))
-          .reduce((best, node) => !best || node.getBoundingClientRect().width > best.getBoundingClientRect().width ? node : best, null);
-      }, 30000, "Không thấy ô Nhắn tin. Hãy đăng nhập Muse trong Chrome rồi thử lại.");
-      if ((field.value ?? field.innerText ?? field.textContent).trim()) throw Error("Ô Nhắn tin Muse đang có bản nháp.");
+      const findField = async () => {
+        const found = await waitFor(() => {
+          const editors = [...document.querySelectorAll('textarea,[contenteditable=true],[contenteditable=plaintext-only],input:not([type]),input[type=text],[role=textbox]')]
+            .filter(node => visible(node) && !node.readOnly && !node.closest('[inert],[aria-hidden=true],[role=search],aside,nav,[role=dialog]'))
+            .filter(node => node.matches('textarea,input') || node.isContentEditable);
+          const bottom = editors.filter(node => node.getBoundingClientRect().bottom > innerHeight * 0.7);
+          const named = bottom.filter(node => ['aria-label','placeholder','data-placeholder','title']
+            .some(attr => /^(Nhắn tin|Message|Send a message|Type a message)(?:$|[.…])/iu.test((node.getAttribute(attr) || '').trim())));
+          const choices = named.length ? named : bottom;
+          return choices.filter(node => !choices.some(other => other !== node && node.contains(other)))
+            .reduce((best, node) => !best || node.getBoundingClientRect().width > best.getBoundingClientRect().width ? node : best, null);
+        }, 30000, "Không thấy ô Nhắn tin. Hãy đăng nhập Muse trong Chrome rồi thử lại.");
+        if ((found.value ?? found.innerText ?? found.textContent).trim()) throw Error("Ô Nhắn tin Muse đang có bản nháp.");
+        return found;
+      };
       const batch = await send({op:"batch"});
       if (batch.done || batch.job !== job.job || batch.index !== job.index)
         throw Error("Danh sách cảnh Muse đã thay đổi.");
       const attempt = state.attempt || 0;
-      // Tu ban 1.3.43 theo yeu cau cua nguoi dung (2026-11-21): moi luot chi
-      // gui DUNG 1 prompt, tai xong 1 anh ve moi gui prompt tiep theo, cu the
-      // chay het viec. Cach gom 4 prompt/luot lam buoc nhan dien va thu anh
-      // mong manh (anh tao du trong chat ma extension thu ve duoc 0), con gui
-      // le thi loi chi ket dung 1 canh va thu lai duoc ngay.
-      const prompts = batch.prompts.slice(0, 1);
-      const batchEnd = attempt ? state.batchEnd : job.index + prompts.length;
-      const tag = tagFor(job, job.index, attempt);
-      const files = prompts.map((description, offset) => {
-        const code = tagFor(job, job.index + offset, attempt);
-        return new File([code + "\n" + description], code + ".txt", {type:"text/plain"});
-      });
-      const scenes = prompts.map((description, offset) => {
-        const index = job.index + offset;
-        return "Cảnh " + (index + 1) + " | " + tagFor(job, index, attempt) + "\n" + description;
-      });
-      const prompt = "Tạo đúng " + scenes.length + " ảnh trong lượt này, mỗi cảnh bên dưới một ảnh riêng. " +
-        "Nếu có thể, chạy các cảnh song song. Lưu tất cả vào Thư viện hình ảnh. " +
-        "Đặt tên mỗi ảnh bắt đầu bằng mã cảnh tương ứng, giữ nguyên mã. Không đưa mã vào nội dung ảnh. " +
-        "Các tệp TXT đính kèm là bản sao của các prompt bên dưới, chỉ tạo một ảnh cho mỗi mã. " +
-        "Khi xong, báo Hoàn tất và liệt kê các mã đã tạo. Mã đầu đợt: " + tag + "\n\n" +
-        scenes.join("\n\n");
-      field.focus();
+      // Gui mot prompt rieng le cho dung mot canh (1 tep TXT, 1 cau lenh) va
+      // tra ve ngay sau khi Muse nhan tin — KHONG doi anh tao xong. Viec
+      // cho va tai anh la cua result() (luot thu lai) hoac collectRound()
+      // (dot 10 canh).
+      const submitOne = async (description, index) => {
+        const field = await findField();
+        const tag = tagFor(job, index, attempt);
+        const files = [new File([tag + "\n" + description], tag + ".txt", {type:"text/plain"})];
+        const prompt = "Tạo đúng 1 ảnh trong lượt này, mỗi cảnh bên dưới một ảnh riêng. " +
+          "Nếu có thể, chạy các cảnh song song. Lưu tất cả vào Thư viện hình ảnh. " +
+          "Đặt tên mỗi ảnh bắt đầu bằng mã cảnh tương ứng, giữ nguyên mã. Không đưa mã vào nội dung ảnh. " +
+          "Các tệp TXT đính kèm là bản sao của các prompt bên dưới, chỉ tạo một ảnh cho mỗi mã. " +
+          "Khi xong, báo Hoàn tất và liệt kê các mã đã tạo. Mã đầu đợt: " + tag + "\n\n" +
+          "Cảnh " + (index + 1) + " | " + tag + "\n" + description;
+        field.focus();
       const data = new DataTransfer();
       files.forEach(file => data.items.add(file));
       field.dispatchEvent(new ClipboardEvent("paste", {clipboardData:data, bubbles:true, cancelable:true}));
@@ -463,14 +463,38 @@ if (location.origin !== "https://muse.ai") {
         const buttons = controls(/^(Gửi|Send|Send message)$/iu);
         return buttons.length === 1 ? buttons[0] : null;
       }, 8000, "Không tìm được nút Gửi của Muse.");
-      const next = {phase:"await", job:job.job, index:job.index, tag, attempt, batchEnd, submittedAt:Date.now(), promptTail:prompt.slice(-48)};
-      save(next);
-      button.click();
-      await send({op:"progress", count:job.index + prompts.length, stage:"submitted"});
-      await waitFor(() => !(field.value ?? field.textContent).includes(tag), 12000, "Muse chưa nhận prompt.");
-      return await result(next, job);
+        button.click();
+        await send({op:"progress", count:index + 1, stage:"submitted"});
+        await waitFor(() => !(field.value ?? field.textContent).includes(tag), 12000, "Muse chưa nhận prompt.");
+        return {tag, tail:prompt.slice(-48)};
+      };
+      if (attempt) {
+        const sent = await submitOne(batch.prompts[0], job.index);
+        const next = {phase:"await", job:job.job, index:job.index, tag:sent.tag, attempt, batchEnd:state.batchEnd, submittedAt:Date.now(), promptTail:sent.tail};
+        save(next);
+        return await result(next, job);
+      }
+      // CHE DO DOT 10 (tu ban 1.3.44 theo yeu cau cua nguoi dung): gui lien
+      // tiep tung prompt rieng le cho 10 canh — prompt 1 gui xong thi gui
+      // ngay prompt 2, khong doi anh tao xong — sau do collectRound cho ca
+      // 10 anh xuat hien roi tai ca 10 ve Ve Tay, nghi 30 giay roi sang dot
+      // tiep theo (prompt 11, 12, ... 20).
+      const roundStart = job.index;
+      const roundEnd = Math.min(roundStart + 10, roundStart + batch.prompts.length);
+      const tags = [];
+      let anchorTail = "";
+      for (let offset = 0; offset < roundEnd - roundStart; offset++) {
+        const sent = await submitOne(batch.prompts[offset], roundStart + offset);
+        tags.push(sent.tag);
+        if (offset === 0) anchorTail = sent.tail;
+      }
+      const collectState = {phase:"collect", job:job.job, index:roundStart, tag:tags[0], attempt:0,
+        batchEnd:roundEnd, roundStart, roundEnd, tags, promptTail:anchorTail, submittedAt:Date.now()};
+      save(collectState);
+      return await collectRound(collectState, job);
     }
     if (state.phase === "await") return await result(state, job);
+    if (state.phase === "collect") return await collectRound(state, job);
     if (state.phase !== "library" && state.phase !== "download") throw Error("Trạng thái Muse không hợp lệ.");
     const file = new URL(location.href).searchParams.get("file");
     if (!file || !file.split("/").pop().toLowerCase().includes(state.tag)) {
@@ -548,34 +572,25 @@ if (location.origin !== "https://muse.ai") {
       }
     }
   }
-  let lastHarvestDiag = "";
-  function harvestChatImages(state, expectedCount) {
-    // Thu dia chi cac anh vua tao trong khung chat. Neo vao cuoi prompt vua
-    // gui: chi lay anh nam SAU moc nay trong trang, tranh nham anh cua cac
-    // luot chat cu (cung nam trong doan chat chinh). Chi tra ve khi du so
-    // luong cua batch; thieu la tra rong de khong bao gio anh xa sai canh.
+  function posAfter(anchorNode, el) {
+    // el co nam sau moc anchorNode trong trang hay khong. Phan tu trong
+    // shadow DOM thi so sanh qua phan tu chu (host) cua no.
+    if (!anchorNode) return true;
+    let node = el;
+    const root = el.getRootNode();
+    if (root instanceof ShadowRoot) node = root.host;
+    try { return !!(anchorNode.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING); }
+    catch { return true; }
+  }
+  function scanMediaCandidates() {
+    // Quet sau toan trang, tra ve cac ung vien anh theo thu tu xuat hien:
+    // the img thuong va trong shadow DOM mo, the video (anh bia/file anh),
+    // phan tu dung anh nen CSS. Chi giu cai du lon de bo qua icon/avatar.
     // Ban 1.3.41 do duoc ca trang chat chi co 3 the <img> va khong cai nao
     // la anh vua tao (chat[img=3 lon=2 neo=1 max=1920x1080 thu=0] o job
-    // 263ee73c2674c) - anh trong chat khong con la the img thuong nua. Ban
-    // 1.3.42 quet sau ca shadow DOM, the <video>, anh nen CSS va chap nhan
-    // them URL data:, dong thoi ghi chan doan tung loai vao lastHarvestDiag.
-    let anchor = null;
-    if (state.promptTail) {
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      while (walker.nextNode()) {
-        if (walker.currentNode.nodeValue.includes(state.promptTail)) anchor = walker.currentNode;
-      }
-    }
-    let nImg = 0, nShadowImg = 0, nVid = 0, nBg = 0, nFrame = document.querySelectorAll("iframe").length;
+    // 263ee73c2674c) nen phai quet ca cac dang the hien khac nay.
+    let nImg = 0, nShadowImg = 0, nVid = 0, nBg = 0;
     const candidates = [];
-    const afterAnchor = (el) => {
-      if (!anchor) return true;
-      let node = el;
-      const root = el.getRootNode();
-      if (root instanceof ShadowRoot) node = root.host;
-      try { return !!(anchor.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING); }
-      catch { return true; }
-    };
     const walk = (rootNode, inShadow) => {
       for (const el of rootNode.querySelectorAll("*")) {
         if (el.tagName === "IMG") {
@@ -610,17 +625,33 @@ if (location.origin !== "https://muse.ai") {
       }
     };
     walk(document, false);
+    return {candidates, nImg, nShadowImg, nVid, nBg, nFrame:document.querySelectorAll("iframe").length};
+  }
+  let lastHarvestDiag = "";
+  function harvestChatImages(state, expectedCount) {
+    // Thu dia chi cac anh vua tao trong khung chat. Neo vao cuoi prompt vua
+    // gui: chi lay anh nam SAU moc nay trong trang, tranh nham anh cua cac
+    // luot chat cu (cung nam trong doan chat chinh). Chi tra ve khi du so
+    // luong cua batch; thieu la tra rong de khong bao gio anh xa sai canh.
+    let anchor = null;
+    if (state.promptTail) {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        if (walker.currentNode.nodeValue.includes(state.promptTail)) anchor = walker.currentNode;
+      }
+    }
+    const scan = scanMediaCandidates();
     const seen = new Set();
     const found = [];
-    for (const c of candidates) {
-      if (!afterAnchor(c.el)) continue;
+    for (const c of scan.candidates) {
+      if (!posAfter(anchor, c.el)) continue;
       if (!/^(https|blob|data):/.test(c.url) || /avatar/iu.test(c.url) || seen.has(c.url)) continue;
       seen.add(c.url);
       found.push(c.url);
     }
-    lastHarvestDiag = "chat[img=" + nImg + " simg=" + nShadowImg + " vid=" + nVid +
-      " bg=" + nBg + " if=" + nFrame + " neo=" + (anchor ? 1 : 0) +
-      " lon=" + candidates.length + " thu=" + found.length + "]";
+    lastHarvestDiag = "chat[img=" + scan.nImg + " simg=" + scan.nShadowImg + " vid=" + scan.nVid +
+      " bg=" + scan.nBg + " if=" + scan.nFrame + " neo=" + (anchor ? 1 : 0) +
+      " lon=" + scan.candidates.length + " thu=" + found.length + "]";
     return found.length >= expectedCount ? found.slice(-expectedCount) : [];
   }
   async function result(state, job) {
@@ -694,6 +725,83 @@ if (location.origin !== "https://muse.ai") {
     // Muse can save images even when the completion message is absent.
     save({...state, phase:"library", confirmed, batchStart:job.index, chatImages, harvestDiag:lastHarvestDiag});
     location.assign("https://muse.ai/library/media?view=images");
+  }
+  function scanRound(tags) {
+    // Chia trang chat thanh tung "vung" theo ma canh: vung cua canh k bat
+    // dau tu tin nhan chua ma cua no va ket thuc o tin nhan chua ma canh ke
+    // tiep. Anh nam trong vung cua canh nao la anh cua canh do — ke ca khi
+    // mot canh bi loi tao anh, cac anh con lai khong bi xao tron thu tu.
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    const starts = tags.map(tag => nodes.find(node => (node.nodeValue || "").includes(tag)) || null);
+    const scan = scanMediaCandidates();
+    const seen = new Set();
+    return tags.map((tag, k) => {
+      const startNode = starts[k];
+      if (!startNode) return {status:"pending", url:""};
+      const endNode = k + 1 < tags.length ? starts[k + 1] : null;
+      const si = nodes.indexOf(startNode);
+      const ei = endNode ? nodes.indexOf(endNode) : nodes.length;
+      let text = "";
+      for (let i = si; i < ei; i++) text += (nodes[i].nodeValue || "") + " ";
+      let url = "";
+      for (const c of scan.candidates) {
+        if (!posAfter(startNode, c.el)) continue;
+        if (endNode && posAfter(endNode, c.el)) continue;
+        if (!/^(https|blob|data):/.test(c.url) || /avatar/iu.test(c.url) || seen.has(c.url)) continue;
+        seen.add(c.url);
+        url = c.url;
+        break;
+      }
+      let status = "pending";
+      if (/chưa tạo được|chưa được tạo|không thể tạo|tạo ảnh thất bại|image generation failed/iu.test(text)) status = "fail";
+      else if (/Mã đã tạo\s*:/u.test(text)) status = "ok";
+      return {status, url};
+    });
+  }
+  async function collectRound(state, job) {
+    // Cho anh cua ca dot xuat hien trong khung chat roi tai tung anh ve Ve
+    // Tay theo dung thu tu canh (bridge chi nhan anh theo thu tu). Canh nao
+    // bi Muse bao loi tao anh thi ban giao cho co che Thu vien / thu lai /
+    // bo qua san co xu ly tiep, khong keo chet ca dot. Moi 60 giay gui mot
+    // progress de Ve Tay khong bao het thoi gian cho (no chi bao loi khi
+    // 330 giay lien tiep khong nhan duoc tin hieu nao).
+    const roundStart = state.roundStart, roundEnd = state.roundEnd;
+    const total = roundEnd - roundStart;
+    let uploaded = Math.max(0, job.index - roundStart);
+    let lastKeepAlive = 0;
+    const deadline = Date.now() + 20 * 60 * 1000;
+    const handoff = (sceneOffset, confirmed) => {
+      save({...state, phase:"library", index:roundStart + sceneOffset,
+        tag:state.tags[sceneOffset], confirmed, batchStart:roundStart,
+        chatImages:[], harvestDiag:lastHarvestDiag});
+      location.assign("https://muse.ai/library/media?view=images");
+    };
+    while (Date.now() < deadline) {
+      const regions = scanRound(state.tags);
+      while (uploaded < total) {
+        const region = regions[uploaded];
+        if (region.status === "fail") { handoff(uploaded, false); return; }
+        if (region.status !== "ok" || !region.url) break;
+        await uploadChatImage(job, roundStart + uploaded, region.url);
+        uploaded++;
+      }
+      if (uploaded >= total) {
+        const next = await send({op:"next"});
+        if (next.done) { sessionStorage.removeItem(key); return; }
+        save({phase:"compose", delay:30000});
+        location.assign("https://muse.ai/");
+        return;
+      }
+      if (Date.now() - lastKeepAlive > 60000) {
+        lastKeepAlive = Date.now();
+        await send({op:"progress", count:roundEnd, stage:"submitted"});
+      }
+      await pause(5000);
+    }
+    const regions = scanRound(state.tags);
+    handoff(uploaded, regions[uploaded]?.status === "ok");
   }
   run().catch(async error => {
     const state = JSON.parse(sessionStorage.getItem(key) || "null");
