@@ -549,9 +549,11 @@ if (location.origin !== "https://muse.ai") {
     // gui: chi lay anh nam SAU moc nay trong trang, tranh nham anh cua cac
     // luot chat cu (cung nam trong doan chat chinh). Chi tra ve khi du so
     // luong cua batch; thieu la tra rong de khong bao gio anh xa sai canh.
-    // Moi lan quet deu ghi lai chan doan (lastHarvestDiag) de khi job dung,
-    // thong bao loi cho biet trang chat luc do co bao nhieu anh, kich thuoc
-    // that lon nhat la bao nhieu va neo co tim thay khong - het phai doan.
+    // Ban 1.3.41 do duoc ca trang chat chi co 3 the <img> va khong cai nao
+    // la anh vua tao (chat[img=3 lon=2 neo=1 max=1920x1080 thu=0] o job
+    // 263ee73c2674c) - anh trong chat khong con la the img thuong nua. Ban
+    // 1.3.42 quet sau ca shadow DOM, the <video>, anh nen CSS va chap nhan
+    // them URL data:, dong thoi ghi chan doan tung loai vao lastHarvestDiag.
     let anchor = null;
     if (state.promptTail) {
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -559,24 +561,61 @@ if (location.origin !== "https://muse.ai") {
         if (walker.currentNode.nodeValue.includes(state.promptTail)) anchor = walker.currentNode;
       }
     }
+    let nImg = 0, nShadowImg = 0, nVid = 0, nBg = 0, nFrame = document.querySelectorAll("iframe").length;
+    const candidates = [];
+    const afterAnchor = (el) => {
+      if (!anchor) return true;
+      let node = el;
+      const root = el.getRootNode();
+      if (root instanceof ShadowRoot) node = root.host;
+      try { return !!(anchor.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING); }
+      catch { return true; }
+    };
+    const walk = (rootNode, inShadow) => {
+      for (const el of rootNode.querySelectorAll("*")) {
+        if (el.tagName === "IMG") {
+          if (inShadow) nShadowImg++; else nImg++;
+          if (el.naturalWidth >= 100 && el.naturalHeight >= 100) {
+            let url = el.currentSrc || el.src || "";
+            const href = el.closest("a")?.href || "";
+            if (/\.(webp|png|jpe?g)(\?|#|$)/iu.test(href)) url = href;
+            candidates.push({el, url});
+          }
+        } else if (el.tagName === "VIDEO") {
+          nVid++;
+          const poster = el.poster || "";
+          const src = el.currentSrc || el.src || "";
+          const url = /\.(webp|png|jpe?g)(\?|#|$)/iu.test(poster) ? poster
+            : (/\.(webp|png|jpe?g)(\?|#|$)/iu.test(src) ? src : "");
+          if (url && (el.videoWidth >= 100 || poster)) candidates.push({el, url});
+        } else {
+          let bgUrl = "";
+          try {
+            const bg = getComputedStyle(el).backgroundImage || "";
+            const m = bg.match(/url\(["']?(.*?)["']?\)/iu);
+            if (m) bgUrl = m[1];
+          } catch {}
+          if (bgUrl) {
+            nBg++;
+            const rect = el.getBoundingClientRect();
+            if (rect.width >= 100 && rect.height >= 100) candidates.push({el, url:bgUrl});
+          }
+        }
+        if (el.shadowRoot) walk(el.shadowRoot, true);
+      }
+    };
+    walk(document, false);
     const seen = new Set();
     const found = [];
-    let big = 0, maxW = 0, maxH = 0;
-    for (const img of document.images) {
-      maxW = Math.max(maxW, img.naturalWidth || 0);
-      maxH = Math.max(maxH, img.naturalHeight || 0);
-      if (img.naturalWidth < 100 || img.naturalHeight < 100) continue;
-      big++;
-      if (anchor && !(anchor.compareDocumentPosition(img) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
-      let url = img.currentSrc || img.src || "";
-      const href = img.closest("a")?.href || "";
-      if (/\.(webp|png|jpe?g)(\?|#|$)/iu.test(href)) url = href;
-      if (!/^(https|blob):/.test(url) || /avatar/iu.test(url) || seen.has(url)) continue;
-      seen.add(url);
-      found.push(url);
+    for (const c of candidates) {
+      if (!afterAnchor(c.el)) continue;
+      if (!/^(https|blob|data):/.test(c.url) || /avatar/iu.test(c.url) || seen.has(c.url)) continue;
+      seen.add(c.url);
+      found.push(c.url);
     }
-    lastHarvestDiag = "chat[img=" + document.images.length + " lon=" + big +
-      " neo=" + (anchor ? 1 : 0) + " max=" + maxW + "x" + maxH + " thu=" + found.length + "]";
+    lastHarvestDiag = "chat[img=" + nImg + " simg=" + nShadowImg + " vid=" + nVid +
+      " bg=" + nBg + " if=" + nFrame + " neo=" + (anchor ? 1 : 0) +
+      " lon=" + candidates.length + " thu=" + found.length + "]";
     return found.length >= expectedCount ? found.slice(-expectedCount) : [];
   }
   async function result(state, job) {
