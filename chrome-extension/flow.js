@@ -727,37 +727,56 @@ if (location.origin !== "https://muse.ai") {
     location.assign("https://muse.ai/library/media?view=images");
   }
   function scanRound(tags) {
-    // Chia trang chat thanh tung "vung" theo ma canh: vung cua canh k bat
-    // dau tu tin nhan chua ma cua no va ket thuc o tin nhan chua ma canh ke
-    // tiep. Anh nam trong vung cua canh nao la anh cua canh do — ke ca khi
-    // mot canh bi loi tao anh, cac anh con lai khong bi xao tron thu tu.
+    // Khop anh cua dot theo THU TU hoan tat, khong theo "vung" rieng tung
+    // canh: ngoai doi thuc te (job b74bc3b9c311c) Muse gom nhieu canh vao
+    // mot tin "Hoan tat" chung va xep anh theo dung thu tu liet ke ma, con
+    // ban 1.3.44 lai doi dung cau "Ma da tao:" nen khong canh nao duoc danh
+    // dau xong. Cach khop dung:
+    // - seq: cac ma canh theo thu tu xuat hien trong cac tin Hoan tat.
+    // - failSet: cac ma bi bao loi tao anh (loai khoi seq).
+    // - urls: cac anh sau tin gui dau tien cua dot, theo thu tu trang.
+    // Ma thu j trong seq nhan anh thu j trong urls; canh loi khong co mat
+    // trong ca hai danh sach nen thu tu khong bao gio lech.
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     const nodes = [];
     while (walker.nextNode()) nodes.push(walker.currentNode);
-    const starts = tags.map(tag => nodes.find(node => (node.nodeValue || "").includes(tag)) || null);
+    const values = nodes.map(node => node.nodeValue || "");
+    const anchorNode = nodes.find(node => (node.nodeValue || "").includes(tags[0])) || null;
+    const failSet = new Set();
+    values.forEach((value, i) => {
+      if (/chưa tạo được|chưa được tạo|không thể tạo|tạo ảnh thất bại|image generation failed/iu.test(value)) {
+        // Chi tim ma loi trong cac dong liet ke ngay sau cau bao loi, dung
+        // lai ngay khi gap tin Hoan tat ke tiep — cua so rong hon se bat
+        // nham ma cua canh thanh cong o khoi sau (da mo phong va bat duoc).
+        for (let j = i; j < Math.min(i + 6, values.length); j++) {
+          if (j > i && /hoàn tất/iu.test(values[j])) break;
+          for (const tag of tags) if (values[j].includes(tag)) failSet.add(tag);
+        }
+      }
+    });
+    const seq = [];
+    values.forEach((value, i) => {
+      if (!/hoàn tất/iu.test(value)) return;
+      for (let j = i; j < Math.min(i + 24, values.length); j++)
+        for (const tag of tags)
+          if (values[j].includes(tag) && !seq.includes(tag) && !failSet.has(tag)) seq.push(tag);
+    });
     const scan = scanMediaCandidates();
     const seen = new Set();
-    return tags.map((tag, k) => {
-      const startNode = starts[k];
-      if (!startNode) return {status:"pending", url:""};
-      const endNode = k + 1 < tags.length ? starts[k + 1] : null;
-      const si = nodes.indexOf(startNode);
-      const ei = endNode ? nodes.indexOf(endNode) : nodes.length;
-      let text = "";
-      for (let i = si; i < ei; i++) text += (nodes[i].nodeValue || "") + " ";
-      let url = "";
-      for (const c of scan.candidates) {
-        if (!posAfter(startNode, c.el)) continue;
-        if (endNode && posAfter(endNode, c.el)) continue;
-        if (!/^(https|blob|data):/.test(c.url) || /avatar/iu.test(c.url) || seen.has(c.url)) continue;
-        seen.add(c.url);
-        url = c.url;
-        break;
-      }
-      let status = "pending";
-      if (/chưa tạo được|chưa được tạo|không thể tạo|tạo ảnh thất bại|image generation failed/iu.test(text)) status = "fail";
-      else if (/Mã đã tạo\s*:/u.test(text)) status = "ok";
-      return {status, url};
+    const urls = [];
+    for (const c of scan.candidates) {
+      if (anchorNode && !posAfter(anchorNode, c.el)) continue;
+      if (!/^(https|blob|data):/.test(c.url) || /avatar/iu.test(c.url) || seen.has(c.url)) continue;
+      seen.add(c.url);
+      urls.push(c.url);
+    }
+    lastHarvestDiag = "round[seq=" + seq.length + " fail=" + failSet.size +
+      " anh=" + urls.length + "/" + tags.length + " ung=" + scan.candidates.length + "]";
+    return tags.map(tag => {
+      if (failSet.has(tag)) return {status:"fail", url:""};
+      const pos = seq.indexOf(tag);
+      if (pos < 0) return {status:"pending", url:""};
+      return {status:"ok", url:urls[pos] || ""};
     });
   }
   async function collectRound(state, job) {
@@ -803,6 +822,17 @@ if (location.origin !== "https://muse.ai") {
     const regions = scanRound(state.tags);
     handoff(uploaded, regions[uploaded]?.status === "ok");
   }
+  // Giu nhip cho Ve Tay: app chi bao "Het thoi gian cho anh" khi 330 giay
+  // lien tiep khong nhan duoc bat ky tin hieu nao, ma vai doan cho cua
+  // extension (cho tao anh, tim o anh Thu vien...) co the im lang lau hon
+  // the (job b74bc3b9c311c chet oan nhu vay). Cu 60 giay gui mot progress
+  // theo trang thai da luu thi app khong bao gio het gio oan nua.
+  setInterval(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(key) || "null");
+      if (saved?.job) send({op:"progress", count:(saved.index ?? 0) + 1, stage:"submitted"}).catch(() => {});
+    } catch {}
+  }, 60000);
   run().catch(async error => {
     const state = JSON.parse(sessionStorage.getItem(key) || "null");
     try {
